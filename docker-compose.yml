@@ -1,0 +1,270 @@
+# ════════════════════════════════════════════════════════════════
+# docker-compose.yml – Plateforme GRH Microservices
+# ISAMM 2ING – Mini-Projet Cloud 2026
+# Dr. Fatma SIALA KALLEL
+# ════════════════════════════════════════════════════════════════
+#
+# Architecture complète :
+#   User → Nginx (HTTPS/LB) → Flask1 / Flask2 / Flask3
+#                               ↓           ↓
+#                           PostgreSQL    Redis
+#                               ↓
+#                       Prometheus + Grafana + cAdvisor
+#
+# Parties couvertes :
+#   Partie 1 – API GRH (employees, tasks, leaves, payroll, jobs)
+#   Partie 2 – PostgreSQL avec volumes persistants
+#   Partie 3 – Redis (cache + compteur de visites + sessions)
+#   Partie 4 – Monitoring : Prometheus + Grafana + cAdvisor
+#   Partie 5 – CI/CD : voir .github/workflows/ci-cd.yml
+#   Partie 6 – HTTPS Nginx + API Gateway
+#   Partie 7 – Scalabilité : docker compose up --scale app1=3
+# ════════════════════════════════════════════════════════════════
+
+version: '3.9'
+
+# ── Réseaux (Partie 6 – Architecture réseau) ─────────────────
+networks:
+  frontend:       # Nginx ↔ Applications
+    driver: bridge
+  backend:        # Applications ↔ DB ↔ Redis
+    driver: bridge
+  monitoring:     # Prometheus ↔ Grafana ↔ cAdvisor
+    driver: bridge
+
+# ── Volumes (Partie 2 – Persistance) ─────────────────────────
+volumes:
+  db-data:          # Données PostgreSQL
+  redis-data:       # Données Redis
+  prometheus-data:  # Métriques Prometheus
+  grafana-data:     # Dashboards Grafana
+
+# ════════════════════════════════════════════════════════════════
+# SERVICES
+# ════════════════════════════════════════════════════════════════
+services:
+
+  # ── PARTIE 2 : Base de données PostgreSQL ─────────────────
+  db:
+    image: postgres:14-alpine
+    container_name: grh-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       grh
+      POSTGRES_USER:     admin
+      POSTGRES_PASSWORD: admin
+    volumes:
+      - db-data:/var/lib/postgresql/data   # Persistance
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d grh"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Pas exposé à l'extérieur (sécurité)
+
+  # ── PARTIE 3 : Cache Redis ────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: grh-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data                   # Persistance Redis
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ── PARTIE 1 : Microservice 1 – Employees / Tasks ────────
+  # PARTIE 7 : Scalable avec --scale app1=3
+  app1:
+    build:
+      context: ./app1
+      dockerfile: Dockerfile
+    container_name: grh-app1
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://admin:admin@db:5432/grh
+      REDIS_HOST:   redis
+      REDIS_PORT:   6379
+      FLASK_ENV:    production
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - frontend
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+    # Port uniquement accessible via Nginx
+    expose:
+      - "5003"
+
+  # ── PARTIE 1 : Microservice 2 – Paie ─────────────────────
+  app2:
+    build:
+      context: ./app2
+      dockerfile: Dockerfile
+    container_name: grh-app2
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://admin:admin@db:5432/grh
+      REDIS_HOST:   redis
+      REDIS_PORT:   6379
+      FLASK_ENV:    production
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - frontend
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    expose:
+      - "5001"
+
+  # ── PARTIE 1 : Microservice 3 – Recrutement ──────────────
+  app3:
+    build:
+      context: ./app3
+      dockerfile: Dockerfile
+    container_name: grh-app3
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://admin:admin@db:5432/grh
+      REDIS_HOST:   redis
+      REDIS_PORT:   6379
+      FLASK_ENV:    production
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - frontend
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    expose:
+      - "5002"
+
+  # ── PARTIE 6 : Nginx – HTTPS + API Gateway + Load Balancer
+  nginx:
+    image: nginx:alpine
+    container_name: grh-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"       # HTTP → redirige vers HTTPS
+      - "443:443"     # HTTPS
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro       # Certificats SSL
+    depends_on:
+      - app1
+      - app2
+      - app3
+    networks:
+      - frontend
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── PARTIE 4 : Monitoring – Prometheus ───────────────────
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    platform: linux/amd64
+    container_name: grh-prometheus
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"   # Interface Prometheus
+    networks:
+      - monitoring
+      - frontend
+      - backend
+
+  # ── PARTIE 4 : Monitoring – Grafana ──────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grh-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER:     admin
+      GF_SECURITY_ADMIN_PASSWORD: admin123
+      GF_USERS_ALLOW_SIGN_UP:     'false'
+      GF_INSTALL_PLUGINS:         grafana-clock-panel
+    volumes:
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"   # Dashboard Grafana
+    depends_on:
+      - prometheus
+    networks:
+      - monitoring
+
+  # ── PARTIE 4 : Monitoring – cAdvisor (CPU/RAM containers)
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: grh-cadvisor
+    restart: unless-stopped
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    ports:
+      - "8080:8080"   # Interface cAdvisor
+    networks:
+      - monitoring
+
+  # ── PARTIE 4 : Monitoring – Node Exporter (métriques host)
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: grh-node-exporter
+    restart: unless-stopped
+    command:
+      - '--path.rootfs=/host'
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    ports:
+      - "9100:9100"
+    networks:
+      - monitoring

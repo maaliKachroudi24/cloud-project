@@ -1,0 +1,77 @@
+# ════════════════════════════════════════════════════════════════
+# prometheus.yml – Partie 4 : Monitoring
+# ════════════════════════════════════════════════════════════════
+global:
+  scrape_interval:     15s   # Toutes les 15 secondes
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'grh-platform'
+
+# ── Règles d'alertes ──────────────────────────────────────────
+rule_files:
+  - "alert_rules.yml"
+
+# ── Alertmanager ──────────────────────────────────────────────
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []   # Configurer si besoin
+
+# ── Scrape Configs ────────────────────────────────────────────
+scrape_configs:
+
+  # Prometheus lui-même
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Métriques des conteneurs (cAdvisor)
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+    metrics_path: /metrics
+
+  # Métriques host (node-exporter)
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+
+  # Microservice 1 – Employees
+  - job_name: 'grh-app1'
+    static_configs:
+      - targets: ['app1:5003']
+    metrics_path: /metrics
+    scrape_interval: 30s
+
+  # Microservice 2 – Payroll
+  - job_name: 'grh-app2'
+    static_configs:
+      - targets: ['app2:5001']
+    metrics_path: /metrics
+    scrape_interval: 30s
+
+  # Microservice 3 – Recruitment
+  - job_name: 'grh-app3'
+    static_configs:
+      - targets: ['app3:5002']
+    metrics_path: /metrics
+    scrape_interval: 30s
+
+  # Redis
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis:6379']
+    scrape_interval: 30s
+
+  # PostgreSQL
+  - job_name: 'postgresql'
+    static_configs:
+      - targets: ['db:5432']
+    scrape_interval: 30s
+
+  # Nginx
+  - job_name: 'nginx'
+    static_configs:
+      - targets: ['nginx:80']
+    metrics_path: /nginx-health
+    scrape_interval: 30s
